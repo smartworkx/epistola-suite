@@ -74,13 +74,155 @@ class JsonSchemaValidator(
         val syntaxResult = validateSchema(objectMapper.writeValueAsString(schema))
         if (syntaxResult is SchemaValidationResult.Invalid) return syntaxResult
 
-        return if (requiresObjectAtRoot(schema, schema, emptySet())) {
-            SchemaValidationResult.Valid
-        } else {
-            SchemaValidationResult.Invalid(
+        if (!requiresObjectAtRoot(schema, schema, emptySet())) {
+            return SchemaValidationResult.Invalid(
                 "A data contract JSON Schema must require an object at its root",
             )
         }
+
+        val negativeItemsBound = findNegativeItemsBound(schema, "$")
+        if (negativeItemsBound != null) {
+            val (path, keyword) = negativeItemsBound
+            return SchemaValidationResult.Invalid(
+                "Property \"$path\" has a negative \"$keyword\"",
+            )
+        }
+
+        val invalidItemsRangePath = findInvalidItemsRange(schema, "$")
+        if (invalidItemsRangePath != null) {
+            return SchemaValidationResult.Invalid(
+                "Property \"$invalidItemsRangePath\" has \"maxItems\" less than \"minItems\"",
+            )
+        }
+
+        return SchemaValidationResult.Valid
+    }
+
+    /**
+     * Finds the first schema location where `minItems` or `maxItems` is
+     * negative. The JSON Schema meta-schema declares both keywords
+     * non-negative, but networknt's compilation step does not itself enforce
+     * that against the meta-schema, so a negative bound would otherwise pass
+     * [validateSchema] silently. Recurses the same way as
+     * [findInvalidItemsRange] (no inheritance needed here — the check is
+     * local to each node's own keywords).
+     */
+    private fun findNegativeItemsBound(schema: ObjectNode, path: String): Pair<String, String>? {
+        for (keyword in listOf("minItems", "maxItems")) {
+            schema.get(keyword)?.takeIf { it.isNumber }?.asDouble()?.let {
+                if (it < 0) return path to keyword
+            }
+        }
+
+        (schema.get("properties") as? ObjectNode)?.let { properties ->
+            for ((name, prop) in properties.properties()) {
+                if (prop is ObjectNode) {
+                    findNegativeItemsBound(prop, "$path.$name")?.let { return it }
+                }
+            }
+        }
+
+        when (val items = schema.get("items")) {
+            is ObjectNode -> findNegativeItemsBound(items, "$path.items")?.let { return it }
+            is ArrayNode -> {
+                for ((index, entry) in items.withIndex()) {
+                    if (entry is ObjectNode) {
+                        findNegativeItemsBound(entry, "$path.items[$index]")?.let { return it }
+                    }
+                }
+            }
+            else -> Unit
+        }
+
+        for (keyword in listOf("allOf", "oneOf", "anyOf")) {
+            val members = schema.get(keyword) as? ArrayNode ?: continue
+            for (member in members) {
+                if (member is ObjectNode) {
+                    val memberPath = if (keyword == "allOf") path else "$path.$keyword"
+                    findNegativeItemsBound(member, memberPath)?.let { return it }
+                }
+            }
+        }
+
+        return null
+    }
+
+    /**
+     * Finds the path of the first schema location whose *effective* `minItems`/
+     * `maxItems` is unsatisfiable (`maxItems < minItems`) — otherwise-valid JSON
+     * Schema (both keywords are independently non-negative integers per the
+     * meta-schema, enforced separately by [findNegativeItemsBound]) that
+     * describes an array no value can ever match. Recurses
+     * into `properties`, `items` (including draft-07 tuple-form `items`), and
+     * composition keywords so the check applies uniformly whether the schema
+     * was assembled by the visual editor or submitted directly.
+     *
+     * `inheritedMinItems`/`inheritedMaxItems` carry bounds down from an
+     * enclosing node's own keywords (and its `allOf` members, which apply
+     * unconditionally alongside it) into a chosen `oneOf`/`anyOf` branch, since
+     * those bounds hold regardless of which branch matches. `allOf` members are
+     * narrowed together with the node's own keywords — `minItems` takes the
+     * tightest (largest) lower bound, `maxItems` the tightest (smallest) upper
+     * bound — mirroring the editor's own allOf-merge semantics.
+     */
+    private fun findInvalidItemsRange(
+        schema: ObjectNode,
+        path: String,
+        inheritedMinItems: Double? = null,
+        inheritedMaxItems: Double? = null,
+    ): String? {
+        val allOfMembers = (schema.get("allOf") as? ArrayNode)?.filterIsInstance<ObjectNode>() ?: emptyList()
+
+        var effectiveMinItems = inheritedMinItems
+        var effectiveMaxItems = inheritedMaxItems
+        for (node in listOf(schema) + allOfMembers) {
+            node.get("minItems")?.takeIf { it.isNumber }?.asDouble()?.let {
+                effectiveMinItems = maxOf(effectiveMinItems ?: it, it)
+            }
+            node.get("maxItems")?.takeIf { it.isNumber }?.asDouble()?.let {
+                effectiveMaxItems = minOf(effectiveMaxItems ?: it, it)
+            }
+        }
+
+        val min = effectiveMinItems
+        val max = effectiveMaxItems
+        if (min != null && max != null && max < min) return path
+
+        (schema.get("properties") as? ObjectNode)?.let { properties ->
+            for ((name, prop) in properties.properties()) {
+                if (prop is ObjectNode) {
+                    findInvalidItemsRange(prop, "$path.$name")?.let { return it }
+                }
+            }
+        }
+
+        when (val items = schema.get("items")) {
+            is ObjectNode -> findInvalidItemsRange(items, "$path.items")?.let { return it }
+            is ArrayNode -> {
+                for ((index, entry) in items.withIndex()) {
+                    if (entry is ObjectNode) {
+                        findInvalidItemsRange(entry, "$path.items[$index]")?.let { return it }
+                    }
+                }
+            }
+            else -> Unit
+        }
+
+        for (member in allOfMembers) {
+            findInvalidItemsRange(member, path, effectiveMinItems, effectiveMaxItems)?.let { return it }
+        }
+
+        for (keyword in listOf("oneOf", "anyOf")) {
+            val members = schema.get(keyword) as? ArrayNode ?: continue
+            for (member in members) {
+                if (member is ObjectNode) {
+                    findInvalidItemsRange(member, "$path.$keyword", effectiveMinItems, effectiveMaxItems)
+                        ?.let { return it }
+                }
+            }
+        }
+
+        return null
     }
 
     private fun requiresObjectAtRoot(
