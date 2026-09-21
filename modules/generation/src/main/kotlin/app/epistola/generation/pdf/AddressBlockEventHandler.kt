@@ -56,6 +56,10 @@ class AddressBlockEventHandler(
 
         val pdfCanvas = PdfCanvas(page.newContentStreamAfter(), page.resources, pdfDoc)
         val canvas = Canvas(pdfCanvas, rect)
+        // The recipient address is meaningful content, not decoration: tag it into
+        // the structure tree (unlike the header/footer/watermark artifacts) so
+        // screen readers announce it (PDF/UA-1, #752).
+        canvas.enableAutoTagging(page)
 
         val slotsByName = addressNode.slots.mapNotNull { slotId ->
             document.slots[slotId]?.let { slot -> slot.name to slot.id }
