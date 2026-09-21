@@ -2,14 +2,6 @@
 
 > **Note:** Helm chart changes are tracked separately in [`charts/epistola/CHANGELOG.md`](charts/epistola/CHANGELOG.md).
 
-## [Unreleased]
-
-- fix(generation): **The address block is now structure-tagged instead of
-  unmarked.** It is drawn at absolute coordinates outside the normal layout
-  flow, so it needs its own PDF/UA-1 tagging; unlike the page header/footer
-  and preview watermark, the recipient address is meaningful content, so it
-  is tagged into the structure tree rather than marked as an artifact.
-
 ## [1.1.0] - 2026-08-25
 
 This release adds an interactive catalog resource-reference graph, richer catalog discovery
